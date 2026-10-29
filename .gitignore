@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+**/logs/
+.vs/
+.idea/
+*.user
+.env
+.env.*
+**/appsettings.Local.json

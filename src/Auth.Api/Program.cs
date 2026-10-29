@@ -1,0 +1,13 @@
+using Auth.Api.Entities;
+using Auth.Api.Repositories;
+using Auth.Api.Services;
+using Microsoft.AspNetCore.Identity;
+using Test3.Common;
+var builder = WebApplication.CreateBuilder(args);
+builder.AddApi("Auth", "Auth");
+builder.Services.AddScoped<IUserRepository, UserRepository>();
+builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
+builder.Services.AddScoped<AuthService>();
+var app = builder.Build();
+app.UseApi();
+app.Run();
