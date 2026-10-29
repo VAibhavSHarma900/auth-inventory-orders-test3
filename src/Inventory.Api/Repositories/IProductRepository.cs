@@ -5,6 +5,7 @@ namespace Inventory.Api.Repositories;
 
 public interface IProductRepository
 {
+    Task<StockOperationResult> ExecuteOperationAsync(StockOperationRequest request, Guid userId, string hash, IReadOnlyList<(Guid Id, int Quantity)> items, bool restore, CancellationToken ct);
     Task<Product> CreateAsync(ProductRequest request, CancellationToken ct);
     Task<Product?> GetAsync(Guid id, CancellationToken ct);
     Task<(IReadOnlyList<Product> Items, long Total)> ListAsync(PageQuery page, CancellationToken ct);

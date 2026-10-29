@@ -1,6 +1,6 @@
 # Auth, Inventory and Orders Microservices
 
-Three .NET 8 APIs using PostgreSQL, JWT roles and parameterized SQL through Npgsql. Each service has Controllers, Services, Repositories, DTOs and Entities, with dependency injection at database and HTTP boundaries.
+Three .NET 8 APIs using PostgreSQL, JWT roles and parameterized Npgsql SQL. Each has Controllers, Services, Repositories, DTOs and Entities, with database/HTTP dependency interfaces.
 
 ## Setup
 
@@ -11,7 +11,7 @@ psql -h localhost -U postgres -d postgres -f database/setup.sql
 dotnet build AuthInventoryOrders.sln -c Release
 ```
 
-The databases must not already exist. For existing empty databases, apply the individual schema scripts. The supplied tables and constraints are unchanged.
+Fresh setup requires new databases. The supplied business tables remain unchanged; two supporting operation tables enable recovery. To upgrade existing Test 3 databases, apply `database/inventory-operations.sql` to `inventory_db` and `database/order-operations.sql` to `order_db` once before starting the updated APIs.
 
 In **each of three PowerShell terminals**, set the same JWT configuration:
 
@@ -58,13 +58,13 @@ Register and login accept:
 {"username":"vaibhav","password":"YOUR_PASSWORD"}
 ```
 
-Usernames are case-sensitive, trimmed and limited to 100 characters. Passwords are hashed. Duplicate usernames return 409; inactive users cannot log in. To create Admin access, register an account, run the following in `auth_db`, then log in again:
+Usernames are trimmed, case-sensitive and limited to 100 characters. Passwords are hashed; inactive accounts cannot log in. Register an Admin account, promote it in `auth_db`, then log in again:
 
 ```sql
 UPDATE users SET role = 'ADMIN' WHERE username = 'your-admin-username';
 ```
 
-Send `Authorization: Bearer YOUR_ACCESS_TOKEN` on all other requests. Tokens expire after one hour; every API validates signature, issuer, audience, expiry and role. Existing tokens retain their claims until expiry; there is no refresh or revocation flow.
+Send `Authorization: Bearer YOUR_ACCESS_TOKEN` on protected requests. All APIs validate signature, issuer, audience, expiry and role. Tokens last one hour; existing claims remain valid until expiry.
 
 ## Inventory and orders
 
@@ -91,14 +91,22 @@ Create a multi-product order with a User token:
 {"items":[{"productId":"FIRST_PRODUCT_UUID","quantity":2},{"productId":"SECOND_PRODUCT_UUID","quantity":1}]}
 ```
 
-At least one item and positive integer quantities are required. Repeated product IDs are combined with overflow checks. Ownership comes from the JWT. Creation returns 201 with `CONFIRMED` status and items. Users cannot read or cancel another user's order (404). Cancellation takes no body, restores stock and returns `CANCELLED`; repeating a completed cancellation does not restore twice.
+Orders require at least one product and positive quantities. Duplicate product IDs are combined with overflow checks. Ownership comes from the JWT; another user's order returns 404. Completed creation returns 201 and `CONFIRMED`; cancellation takes no body and returns `CANCELLED`.
 
-Order uses `POST /internal/stock/deduct` and `/internal/stock/restore`, protected by a User JWT plus the service secret. Clients do not supply that secret. These accept the same `items` body. Each inventory batch validates and changes all items in one transaction with consistently ordered row locks. Restoration supports soft-deleted products. Order/items use a separate local transaction; cancellation locks the order to serialize concurrent requests.
+## Consistency and recovery
 
-**Consistency limitation:** separate databases cannot commit atomically. A lost stock response or subsequent Order commit failure can leave stock changed without a matching committed order state. Retrying an uncertain cancellation can restore twice. Calls time out after five seconds; stock mutations are not automatically retried. Reconcile order IDs, items and correlated logs before manually correcting uncertain outcomes. The supplied schema has no durable operation tracking or automatic recovery. Admin PUT sets absolute stock and can overwrite deductions when using stale quantities.
+Order commits the order/items (`CREATED`) and a `PENDING` operation before calling Inventory. Inventory validates the entire batch and commits stock plus its result atomically. Order then commits `CONFIRMED` and `COMPLETED`. Rejected validation removes the provisional order/items and returns 404 or 409 without partial deductions.
+
+Cancellation records one operation, restores stock, then commits `CANCELLED`. Inventory records outcomes by operation ID and order/action; retries return the saved outcome without changing stock again. Different payloads under the same ID are rejected. Ordered row locks prevent overselling and concurrent duplicate processing.
+
+**202 Accepted means pending**, with `Location`, `Retry-After` and `pendingOperation` (`CREATE`/`CANCEL`). Poll the order URL until `pendingOperation` is null. Pending creation stays `CREATED`; pending cancellation stays `CONFIRMED`. The worker checks every two seconds and schedules failed calls five seconds later, including across process/database restarts. A rejected creation disappears from history; replaying its request key returns its rejection.
+
+Send a client-generated UUID in **`Idempotency-Key`** when creating an order. Reuse it with identical items to retry safely; different items return 409. Without a supplied key, each POST is a new request. Cancellation automatically reuses its recorded operation.
+
+Internal stock APIs require a fresh service JWT and the stock secret; caller tokens are never stored. This provides **eventual consistency and automatic recovery**, not an instantaneous distributed transaction. Dependencies must recover and operation records must be retained. Permanent business rejection, invalid configuration or damaged records require correction. Admin PUT replaces absolute stock, so stale Admin quantities can overwrite changes.
 
 ## Errors and logs
 
-Problem Details responses use 400 for validation, 401 authentication, 403 permissions, 404 missing resources, 409 stock/status conflicts, 503 Inventory dependency failures and sanitized 500 unexpected errors. Responses and inter-service calls carry `X-Correlation-ID`.
+Problem Details responses use 400 for validation, 401 authentication, 403 permissions, 404 missing resources, 409 stock/status conflicts and sanitized 500 unexpected errors. Accepted operations remain pending during Inventory dependency failures rather than reporting false completion. Responses and inter-service calls carry `X-Correlation-ID`.
 
 Each service writes separate daily rolling files under its own `logs/` directory, rolling at 10 MB and retaining seven files. Credentials, tokens and full request bodies are excluded from logs; logs and build outputs are ignored by Git.

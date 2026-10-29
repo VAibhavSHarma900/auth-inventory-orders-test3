@@ -1,51 +1,42 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Claims;
+using System.Text;
 using System.Text.Json;
+using Microsoft.IdentityModel.Tokens;
 using Order.Api.DTOs;
+using Order.Api.Entities;
 using Test3.Common;
 namespace Order.Api.Services;
 
 public sealed class InventoryClient(HttpClient client, IConfiguration config) : IInventoryClient
 {
-    public async Task<ProductSnapshot> GetAsync(Guid id, string token, string correlationId, CancellationToken ct)
+    public async Task<StockOperationResult> ExecuteAsync(OrderOperation operation, CancellationToken ct)
     {
-        using var request = Make(HttpMethod.Get, $"api/products/{id}", token, correlationId);
-        using var response = await SendAsync(request, ct);
-        Check(response);
+        // Recovery uses fresh service credentials, never a stored or expired client token.
+        var token = new JwtSecurityToken(config["Jwt:Issuer"], config["Jwt:Audience"],
+            [new Claim("sub", operation.UserId.ToString()), new Claim("role", "USER"), new Claim("service", "order-service")],
+            notBefore: DateTime.UtcNow, expires: DateTime.UtcNow.AddMinutes(1),
+            signingCredentials: new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(config["Jwt:Key"]!)), SecurityAlgorithms.HmacSha256));
+        using var request = new HttpRequestMessage(HttpMethod.Post, operation.OperationType == "CREATE" ? "internal/stock/deduct" : "internal/stock/restore");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
+        request.Headers.Add("X-Stock-Service-Key", config["InternalStock:Key"]);
+        request.Headers.Add("X-Correlation-ID", operation.CorrelationId);
+        request.Content = JsonContent.Create(new { operation.OperationId, operation.OrderId, operation.Items });
         try
         {
-            var product = await response.Content.ReadFromJsonAsync<ProductSnapshot>(cancellationToken: ct);
-            if (product is null || product.ProductId != id || !product.IsActive || product.StockQty < 0) throw Unavailable();
-            return product;
+            using var response = await client.SendAsync(request, ct);
+            if (response.StatusCode != HttpStatusCode.OK) throw Unavailable();
+            var result = await response.Content.ReadFromJsonAsync<StockOperationResult>(cancellationToken: ct);
+            if (result is null || result.OperationId != operation.OperationId ||
+                !(result.Outcome == "APPLIED" && result.ErrorStatus is null || result.Outcome == "REJECTED" && result.ErrorStatus is 404 or 409))
+                throw Unavailable();
+            return result;
         }
-        catch (JsonException) { throw Unavailable(); }
-    }
-    public async Task ChangeAsync(IReadOnlyList<StockItem> items, bool restore, string token, string correlationId, CancellationToken ct)
-    {
-        using var request = Make(HttpMethod.Post, restore ? "internal/stock/restore" : "internal/stock/deduct", token, correlationId);
-        request.Headers.Add("X-Stock-Service-Key", config["InternalStock:Key"]);
-        request.Content = JsonContent.Create(new { items });
-        using var response = await SendAsync(request, ct);
-        Check(response);
-    }
-    private static HttpRequestMessage Make(HttpMethod method, string path, string token, string correlationId)
-    {
-        var request = new HttpRequestMessage(method, path);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        request.Headers.Add("X-Correlation-ID", correlationId);
-        return request;
-    }
-    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-    {
-        try { return await client.SendAsync(request, ct); }
         catch (HttpRequestException) { throw Unavailable(); }
+        catch (JsonException) { throw Unavailable(); }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw Unavailable(); }
     }
-    private static void Check(HttpResponseMessage response)
-    {
-        if (response.StatusCode == HttpStatusCode.NotFound) throw new ApiException(404, "A requested product was not found.");
-        if (response.StatusCode == HttpStatusCode.Conflict) throw new ApiException(409, "The requested stock operation conflicts with available stock.");
-        if (response.StatusCode != HttpStatusCode.OK) throw Unavailable();
-    }
-    private static ApiException Unavailable() => new(503, "Inventory Service could not complete the request. A stock mutation may have an uncertain outcome; reconcile before retrying.");
+    private static ApiException Unavailable() => new(503, "Inventory has not confirmed the operation; durable recovery will retry it safely.");
 }

@@ -10,6 +10,8 @@ if (!inventoryUrl.IsAbsoluteUri || !inventoryUrl.AbsoluteUri.EndsWith('/'))
     throw new InvalidOperationException("InventoryService:BaseUrl must be an absolute URL ending with '/'.");
 builder.Services.AddScoped<IOrderRepository, OrderRepository>();
 builder.Services.AddScoped<OrderService>();
+builder.Services.AddScoped<OperationProcessor>();
+builder.Services.AddHostedService<RecoveryWorker>();
 builder.Services.AddHttpClient<IInventoryClient, InventoryClient>(client =>
 {
     client.BaseAddress = inventoryUrl;

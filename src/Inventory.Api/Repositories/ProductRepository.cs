@@ -72,6 +72,59 @@ public sealed class ProductRepository(NpgsqlDataSource source) : IProductReposit
     {
         await using var connection = await source.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
+        var result = await ApplyStockAsync(connection, transaction, items, restore, ct);
+        await transaction.CommitAsync(ct);
+        return result;
+    }
+
+    public async Task<StockOperationResult> ExecuteOperationAsync(StockOperationRequest request, Guid userId, string hash,
+        IReadOnlyList<(Guid Id, int Quantity)> items, bool restore, CancellationToken ct)
+    {
+        await using var connection = await source.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await using var insert = new NpgsqlCommand("""
+            INSERT INTO stock_operations(operation_id, order_id, user_id, operation_type, request_hash, outcome)
+            VALUES (@operation, @order, @user, @type, @hash, 'APPLIED')
+            ON CONFLICT DO NOTHING
+            """, connection, transaction);
+        insert.Parameters.AddWithValue("operation", request.OperationId!.Value);
+        insert.Parameters.AddWithValue("order", request.OrderId!.Value);
+        insert.Parameters.AddWithValue("user", userId);
+        insert.Parameters.AddWithValue("type", restore ? "RESTORE" : "DEDUCT");
+        insert.Parameters.AddWithValue("hash", hash);
+        var firstAttempt = await insert.ExecuteNonQueryAsync(ct) == 1;
+        if (firstAttempt)
+        {
+            // The ledger and stock share one transaction; neither can commit without the other.
+            try { await ApplyStockAsync(connection, transaction, items, restore, ct); }
+            catch (ApiException ex) when (ex.StatusCode is 404 or 409)
+            {
+                await using var reject = new NpgsqlCommand("""
+                    UPDATE stock_operations SET outcome = 'REJECTED', error_status = @status, error_detail = @detail
+                    WHERE operation_id = @operation
+                    """, connection, transaction);
+                reject.Parameters.AddWithValue("operation", request.OperationId.Value);
+                reject.Parameters.AddWithValue("status", ex.StatusCode);
+                reject.Parameters.AddWithValue("detail", ex.Message);
+                await reject.ExecuteNonQueryAsync(ct);
+            }
+        }
+        StockOperationResult result;
+        await using (var read = new NpgsqlCommand("SELECT request_hash, outcome, error_status, error_detail FROM stock_operations WHERE operation_id = @operation", connection, transaction))
+        {
+            read.Parameters.AddWithValue("operation", request.OperationId.Value);
+            await using var reader = await read.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) throw new ApiException(409, "The order already has a different operation of this type.");
+            if (reader.GetString(0) != hash) throw new ApiException(409, "Operation ID was already used with different content.");
+            result = new(request.OperationId.Value, reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetInt32(2), reader.IsDBNull(3) ? null : reader.GetString(3));
+        }
+        await transaction.CommitAsync(ct);
+        return result;
+    }
+
+    private static async Task<IReadOnlyList<StockResponse>> ApplyStockAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
+        IReadOnlyList<(Guid Id, int Quantity)> items, bool restore, CancellationToken ct)
+    {
         var locked = new List<(Guid Id, int Quantity, int Stock)>();
         // Every mutation locks rows in the same order, preventing batch-to-batch deadlocks.
         foreach (var item in items.OrderBy(i => i.Id))
@@ -96,7 +149,6 @@ public sealed class ProductRepository(NpgsqlDataSource source) : IProductReposit
             await cmd.ExecuteNonQueryAsync(ct);
             result.Add(new(item.Id, stock));
         }
-        await transaction.CommitAsync(ct);
         return result;
     }
 

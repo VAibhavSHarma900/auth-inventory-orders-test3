@@ -22,7 +22,7 @@ public sealed class StockItem : IValidatableObject
         if (ProductId == Guid.Empty) yield return new("ProductId cannot be empty.", [nameof(ProductId)]);
     }
 }
-public sealed class StockBatchRequest
+public class StockBatchRequest
 {
     [Required, MinLength(1)] public List<StockItem> Items { get; init; } = [];
 }
@@ -31,3 +31,15 @@ public sealed record ProductResponse(Guid ProductId, string Name, int StockQty, 
 {
     public static ProductResponse From(Product p) => new(p.ProductId, p.Name, p.StockQty, p.IsActive, p.CreatedAt, p.UpdatedAt);
 }
+
+public sealed class StockOperationRequest : StockBatchRequest, IValidatableObject
+{
+    [Required] public Guid? OperationId { get; init; }
+    [Required] public Guid? OrderId { get; init; }
+    public IEnumerable<ValidationResult> Validate(ValidationContext context)
+    {
+        if (OperationId == Guid.Empty) yield return new("OperationId cannot be empty.", [nameof(OperationId)]);
+        if (OrderId == Guid.Empty) yield return new("OrderId cannot be empty.", [nameof(OrderId)]);
+    }
+}
+public sealed record StockOperationResult(Guid OperationId, string Outcome, int? ErrorStatus, string? ErrorDetail);

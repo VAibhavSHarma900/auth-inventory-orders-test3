@@ -16,10 +16,11 @@ public sealed class OrderRequest
     [Required, MinLength(1)] public List<OrderItemRequest> Items { get; init; } = [];
 }
 public sealed record OrderItemResponse(Guid OrderItemId, Guid ProductId, int Quantity);
-public sealed record OrderResponse(Guid OrderId, Guid UserId, string OrderStatus, DateTime CreatedAt, IReadOnlyList<OrderItemResponse> Items)
+public sealed record OrderResponse(Guid OrderId, Guid UserId, string OrderStatus, DateTime CreatedAt, IReadOnlyList<OrderItemResponse> Items, string? PendingOperation)
 {
     public static OrderResponse From(Entities.Order order) => new(order.OrderId, order.UserId, order.OrderStatus, order.CreatedAt,
-        order.Items.Select(i => new OrderItemResponse(i.OrderItemId, i.ProductId, i.Quantity)).ToArray());
+        order.Items.Select(i => new OrderItemResponse(i.OrderItemId, i.ProductId, i.Quantity)).ToArray(), order.PendingOperation);
 }
 public sealed record StockItem(Guid ProductId, int Quantity);
-public sealed record ProductSnapshot(Guid ProductId, int StockQty, bool IsActive);
+public sealed record OrderActionResult(OrderResponse Order, bool IsPending);
+public sealed record StockOperationResult(Guid OperationId, string Outcome, int? ErrorStatus, string? ErrorDetail);
